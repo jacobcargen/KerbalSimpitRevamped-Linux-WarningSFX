@@ -58,6 +58,8 @@ install:all
 	cp Bin/KerbalSimpit.dll $(INSTALLDIR)
 	mkdir -p $(INSTALLDIR)/Localisations
 	cp KerbalSimpit/Localisation/*.cfg $(INSTALLDIR)/Localisations
+	mkdir -p $(INSTALLDIR)/voice_warnings
+	cp -r distrib/voice_warnings/* $(INSTALLDIR)/voice_warnings/ 2>/dev/null || true
 
 clean:
 	$(MSBUILD) /p:Configuration=$(CONFIG) /t:Clean Main.csproj
