@@ -1,4 +1,5 @@
 ﻿using KerbalSimpit.Utilities;
+using KerbalSimpit.Providers;
 using System;
 using System.Runtime.InteropServices;
 using UnityEngine;
@@ -17,6 +18,9 @@ namespace KerbalSimpit.KerbalSimpit.External
 
         [DllImport("libXtst.so.6")]
         private static extern int XTestFakeKeyEvent(IntPtr display, uint keycode, bool is_press, ulong delay);
+
+        [DllImport("libXtst.so.6")]
+        private static extern int XTestFakeButtonEvent(IntPtr display, uint button, bool is_press, ulong delay);
 
         [DllImport("libX11.so.6")]
         private static extern int XFlush(IntPtr display);
@@ -162,6 +166,16 @@ namespace KerbalSimpit.KerbalSimpit.External
                 case 0x10: return 0xffe1; // VK_SHIFT -> XK_Shift_L
                 case 0x11: return 0xffe3; // VK_CONTROL -> XK_Control_L
                 case 0x12: return 0xffe9; // VK_MENU (Alt) -> XK_Alt_L
+                // Left/Right-specific virtual-key codes (Windows):
+                // VK_LSHIFT  0xA0, VK_RSHIFT 0xA1
+                // VK_LCONTROL 0xA2, VK_RCONTROL 0xA3
+                // VK_LMENU 0xA4, VK_RMENU 0xA5
+                case 0xA0: return 0xffe1; // VK_LSHIFT -> XK_Shift_L
+                case 0xA1: return 0xffe2; // VK_RSHIFT -> XK_Shift_R
+                case 0xA2: return 0xffe3; // VK_LCONTROL -> XK_Control_L
+                case 0xA3: return 0xffe4; // VK_RCONTROL -> XK_Control_R
+                case 0xA4: return 0xffe9; // VK_LMENU (Left Alt) -> XK_Alt_L
+                case 0xA5: return 0xffea; // VK_RMENU (Right Alt) -> XK_Alt_R
                 case 0x14: return 0xffe5; // VK_CAPITAL -> XK_Caps_Lock
                 case 0x91: return 0xff14; // VK_SCROLL -> XK_Scroll_Lock
                 
@@ -171,7 +185,7 @@ namespace KerbalSimpit.KerbalSimpit.External
             }
         }
 
-        private void SendX11Key(int vkCode)
+        private void SendX11Key(int vkCode, byte modifier = 0)
         {
             if (display == IntPtr.Zero) return;
 
@@ -183,10 +197,27 @@ namespace KerbalSimpit.KerbalSimpit.External
                 uint keycode = XKeysymToKeycode(display, keysym);
                 if (keycode != 0)
                 {
-                    XTestFakeKeyEvent(display, keycode, true, 0);  // Key down
-                    XTestFakeKeyEvent(display, keycode, false, 0); // Key up
+                    // modifier == 0 -> default behaviour: send press then release
+                    if (modifier == 0)
+                    {
+                        XTestFakeKeyEvent(display, keycode, true, 0);  // Key down
+                        XTestFakeKeyEvent(display, keycode, false, 0); // Key up
+                    }
+                    else
+                    {
+                        // bit 0x01 = press (keydown), bit 0x02 = release (keyup)
+                        if ((modifier & 0x01) != 0)
+                        {
+                            XTestFakeKeyEvent(display, keycode, true, 0);
+                        }
+                        if ((modifier & 0x02) != 0)
+                        {
+                            XTestFakeKeyEvent(display, keycode, false, 0);
+                        }
+                    }
+
                     XFlush(display);
-                    Debug.Log(string.Format("Simpit KeyboardEmulator: Sent X11 key VK=0x{0:X} KeySym=0x{1:X}", vkCode, keysym));
+                    Debug.Log(string.Format("Simpit KeyboardEmulator: Sent X11 key VK=0x{0:X} KeySym=0x{1:X} modifier=0x{2:X}", vkCode, keysym, modifier));
                 }
                 else
                 {
@@ -199,6 +230,26 @@ namespace KerbalSimpit.KerbalSimpit.External
             }
         }
 
+        private void SendX11MouseWheel(uint button, int count = 3)
+        {
+            try
+            {
+                // Button 4 = wheel up, Button 5 = wheel down
+                // Send multiple scroll events for more noticeable effect
+                for (int i = 0; i < count; i++)
+                {
+                    XTestFakeButtonEvent(display, button, true, 0);  // Button press
+                    XTestFakeButtonEvent(display, button, false, 0); // Button release
+                }
+                XFlush(display);
+                Debug.Log(string.Format("Simpit KeyboardEmulator: Sent {0} X11 mouse button {1} events", count, button));
+            }
+            catch (Exception e)
+            {
+                Debug.LogError("Simpit KeyboardEmulator: X11 mouse button send failed - " + e.Message);
+            }
+        }
+
         public void KeyboardEmulatorCallback(byte ID, object Data)
         {
             try
@@ -207,10 +258,38 @@ namespace KerbalSimpit.KerbalSimpit.External
 
                 Debug.Log(string.Format("Simpit KeyboardEmulator: Received key=0x{0:X}, modifier={1}", payload.key, payload.modifier));
 
+                // Handle audio toggle: single quote (') toggles audio on/off
+                if (payload.key == 0xDE)  // VK_OEM_7 = quote key
+                {
+                    // Toggle audio state
+                    WarningAudio.AudioEnabled = !WarningAudio.AudioEnabled;
+                    Debug.Log(string.Format("Simpit KeyboardEmulator: Toggled warning audio - now {0}", WarningAudio.AudioEnabled ? "ENABLED" : "DISABLED"));
+                }
+                
+                // Handle mouse wheel emulation (special VK codes)
+                if (payload.key == 0xFF01)  // Mouse wheel up (custom VK code)
+                {
+                    Debug.Log("Simpit KeyboardEmulator: Mouse wheel UP (zoom in)");
+                    if (useX11)
+                    {
+                        SendX11MouseWheel(4);  // X11 button 4 = wheel up
+                    }
+                    return;
+                }
+                else if (payload.key == 0xFF02)  // Mouse wheel down (custom VK code)
+                {
+                    Debug.Log("Simpit KeyboardEmulator: Mouse wheel DOWN (zoom out)");
+                    if (useX11)
+                    {
+                        SendX11MouseWheel(5);  // X11 button 5 = wheel down
+                    }
+                    return;
+                }
+
                 if (useX11)
                 {
                     // Use X11 to send real keypresses - supports any key dynamically
-                    SendX11Key(payload.key);
+                    SendX11Key(payload.key, payload.modifier);
                 }
                 else
                 {
